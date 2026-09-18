@@ -3,12 +3,17 @@ name: CMake on multiple platforms
 on:
   push:
     branches: ["main"]
+    tags: ["v*"]          # 打 tag（如 v1.0.0）时触发 Release 发布
   pull_request:
     branches: ["main"]
 
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+
+    # Release 发布需要写权限
+    permissions:
+      contents: write
 
     strategy:
       fail-fast: false
@@ -51,3 +56,35 @@ jobs:
       - name: Test
         working-directory: ${{ steps.strings.outputs.build-output-dir }}
         run: ctest --build-config ${{ matrix.build_type }}
+
+      # ---------- 打包成 ZIP ----------
+      - name: Install 7z (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - name: Package to ZIP
+        shell: bash
+        run: |
+          cd ${{ steps.strings.outputs.build-output-dir }}
+          ZIP_NAME="BoxStudio-${{ matrix.os }}-${{ matrix.cpp_compiler }}-gui${{ matrix.gui }}.zip"
+          7z a -tzip "${{ github.workspace }}/$ZIP_NAME" ./**/*.exe ./**/*.dll ./**/*.so ./**/*.a || true
+          echo "ZIP_PATH=${{ github.workspace }}/$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+
+      # ---------- 平时：上传为 artifact（Actions 页面下载）----------
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boxstudio-${{ matrix.os }}-${{ matrix.cpp_compiler }}-gui${{ matrix.gui }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+          retention-days: 14
+
+      # ---------- 打 tag 时：上传到 GitHub Release ----------
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_PATH }}
+          # 自动生成 Release 说明；如果已有说明可删掉此行
+          generate_release_notes: true
