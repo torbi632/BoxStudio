@@ -62,7 +62,7 @@ jobs:
 
       - name: Prepare artifact directory
         shell: bash
-        run: mkdir -p "${{ steps.strings.outputs.artifact-dir }}/bin"
+        run: mkdir -p "${{ steps.strings.outputs.artifact-dir }}/bin" "${{ steps.strings.outputs.artifact-dir }}/source"
 
       # 1) 打包构建产物（可执行文件/库等）
       - name: Package build output
@@ -71,12 +71,10 @@ jobs:
           ARTIFACT_BIN="${{ steps.strings.outputs.artifact-dir }}/bin"
           BUILD_DIR="${{ steps.strings.outputs.build-output-dir }}"
 
-          # Windows: .exe / .dll / .lib  |  Linux: .so / .a
           find "$BUILD_DIR" -type f \
             \( -name "*.exe" -o -name "*.dll" -o -name "*.so" -o -name "*.a" -o -name "*.lib" \) \
             -exec cp {} "$ARTIFACT_BIN/" \; || true
 
-          # Linux 下无扩展名的可执行文件
           if [ "${{ runner.os }}" = "Linux" ]; then
             find "$BUILD_DIR" -maxdepth 2 -type f -executable \
               ! -name "*.so*" ! -name "*.a" \
@@ -106,7 +104,6 @@ jobs:
 
       # ============ 上传步骤 ============
 
-      # 上传最终可执行文件/库
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
@@ -115,7 +112,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      # 上传源码包
       - name: Upload source archive
         uses: actions/upload-artifact@v4
         with:
@@ -124,7 +120,137 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      # 上传完整构建目录（含中间文件）
+      - name: Upload full build directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-build
+          path: ${{ steps.strings.outputs.artifact-dir }}/build-*.tar.gz
+          if-no-files-found: warn
+          retention-days: 30name: CMake on multiple platforms
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            build_type: Release
+            cpp_compiler: cl
+            gui: ON
+            artifact_name: build-windows-msvc-gui
+          - os: ubuntu-latest
+            build_type: Release
+            cpp_compiler: g++
+            gui: OFF
+            artifact_name: build-ubuntu-gcc
+          - os: ubuntu-latest
+            build_type: Release
+            cpp_compiler: clang++
+            gui: OFF
+            artifact_name: build-ubuntu-clang
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set reusable strings
+        id: strings
+        shell: bash
+        run: |
+          WORKSPACE="${{ github.workspace }}"
+          # Git Bash 环境下把反斜杠统一成正斜杠
+          WORKSPACE="${WORKSPACE//\\//}"
+          echo "build-output-dir=${WORKSPACE}/build" >> "$GITHUB_OUTPUT"
+          echo "artifact-dir=${WORKSPACE}/artifact" >> "$GITHUB_OUTPUT"
+
+      - name: Configure CMake
+        run: >
+          cmake -B ${{ steps.strings.outputs.build-output-dir }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DBOXSTUDIO_BUILD_GUI=${{ matrix.gui }}
+          -S ${{ github.workspace }}
+
+      - name: Build
+        run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+
+      - name: Test
+        working-directory: ${{ steps.strings.outputs.build-output-dir }}
+        run: ctest --build-config ${{ matrix.build_type }}
+
+      # ============ 打包步骤 ============
+
+      - name: Prepare artifact directory
+        shell: bash
+        run: mkdir -p "${{ steps.strings.outputs.artifact-dir }}/bin" "${{ steps.strings.outputs.artifact-dir }}/source"
+
+      # 1) 打包构建产物（可执行文件/库等）
+      - name: Package build output
+        shell: bash
+        run: |
+          ARTIFACT_BIN="${{ steps.strings.outputs.artifact-dir }}/bin"
+          BUILD_DIR="${{ steps.strings.outputs.build-output-dir }}"
+
+          find "$BUILD_DIR" -type f \
+            \( -name "*.exe" -o -name "*.dll" -o -name "*.so" -o -name "*.a" -o -name "*.lib" \) \
+            -exec cp {} "$ARTIFACT_BIN/" \; || true
+
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            find "$BUILD_DIR" -maxdepth 2 -type f -executable \
+              ! -name "*.so*" ! -name "*.a" \
+              -exec cp {} "$ARTIFACT_BIN/" \; || true
+          fi
+
+      # 2) 打包源码（用相对文件名，避开 Windows 盘符解析问题）
+      - name: Package source code
+        shell: bash
+        run: |
+          cd "${{ steps.strings.outputs.artifact-dir }}/source"
+          git archive --format=tar.gz \
+            -o "source-${{ matrix.artifact_name }}.tar.gz" \
+            -C "${{ github.workspace }}" HEAD
+
+      # 3) 打包构建目录（用相对文件名，避开 Windows 盘符解析问题）
+      - name: Package build directory
+        shell: bash
+        run: |
+          cd "${{ steps.strings.outputs.artifact-dir }}"
+          tar -czf "build-${{ matrix.artifact_name }}.tar.gz" \
+            -C "${{ github.workspace }}" build
+
+      - name: List artifact contents
+        shell: bash
+        run: ls -lahR "${{ steps.strings.outputs.artifact-dir }}"
+
+      # ============ 上传步骤 ============
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-binaries
+          path: ${{ steps.strings.outputs.artifact-dir }}/bin/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-source
+          path: ${{ steps.strings.outputs.artifact-dir }}/source/*.tar.gz
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Upload full build directory
         uses: actions/upload-artifact@v4
         with:
