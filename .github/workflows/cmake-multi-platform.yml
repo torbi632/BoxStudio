@@ -3,17 +3,12 @@ name: CMake on multiple platforms
 on:
   push:
     branches: ["main"]
-    tags: ["v*"]          # 打 tag（如 v1.0.0）时触发 Release 发布
   pull_request:
     branches: ["main"]
 
 jobs:
   build:
     runs-on: ${{ matrix.os }}
-
-    # softprops/action-gh-release 需要写权限
-    permissions:
-      contents: write
 
     strategy:
       fail-fast: false
@@ -23,24 +18,30 @@ jobs:
             build_type: Release
             cpp_compiler: cl
             gui: ON
+            artifact_name: build-windows-msvc-gui
           - os: ubuntu-latest
             build_type: Release
             cpp_compiler: g++
             gui: OFF
+            artifact_name: build-ubuntu-gcc
           - os: ubuntu-latest
             build_type: Release
             cpp_compiler: clang++
             gui: OFF
+            artifact_name: build-ubuntu-clang
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Set reusable strings
         id: strings
         shell: bash
-        run: echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+          echo "artifact-dir=${{ github.workspace }}/artifact" >> "$GITHUB_OUTPUT"
 
       - name: Configure CMake
         run: >
@@ -57,34 +58,78 @@ jobs:
         working-directory: ${{ steps.strings.outputs.build-output-dir }}
         run: ctest --build-config ${{ matrix.build_type }}
 
-      # ---------- 打包成 ZIP（用 CMake 自带 tar，跨平台零依赖）----------
-      - name: Package to ZIP
+      # ============ 打包步骤 ============
+
+      - name: Prepare artifact directory
+        shell: bash
+        run: mkdir -p "${{ steps.strings.outputs.artifact-dir }}"
+
+      # 1) 打包构建产物（可执行文件/库等）
+      - name: Package build output
         shell: bash
         run: |
-          cd ${{ steps.strings.outputs.build-output-dir }}
-          ZIP_NAME="BoxStudio-${{ matrix.os }}-${{ matrix.cpp_compiler }}-gui${{ matrix.gui }}.zip"
-          # 收集要打包的产物（按需增删后缀）
-          FILES=$(find . -type f \( -name '*.exe' -o -name '*.dll' -o -name '*.so' -o -name '*.a' \))
-          if [ -z "$FILES" ]; then
-            echo "::error::没有找到任何构建产物"
-            exit 1
-          fi
-          cmake -E tar cf "${{ github.workspace }}/$ZIP_NAME" --format=zip -- $FILES
-          echo "ZIP_PATH=${{ github.workspace }}/$ZIP_NAME" >> "$GITHUB_ENV"
+          mkdir -p "${{ steps.strings.outputs.artifact-dir }}/bin"
+          # 复制构建产物（可执行文件、动态库等）
+          # Windows: .exe / .dll  |  Linux: 无扩展名可执行文件 / .so
+          find "${{ steps.strings.outputs.build-output-dir }}" \
+            -type f \( -name "*.exe" -o -name "*.dll" -o -name "*.so" -o -name "*.a" -o -name "*.lib" \) \
+            -exec cp {} "${{ steps.strings.outputs.artifact-dir }}/bin/" \; || true
 
-      # ---------- 平时：上传为 artifact（Actions 页面下载）----------
-      - name: Upload ZIP artifact
+          # 如果可执行文件没有扩展名（Linux），复制 build 根目录下的可执行文件
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            find "${{ steps.strings.outputs.build-output-dir }}" -maxdepth 2 -type f -executable \
+              ! -name "*.so*" ! -name "*.a" \
+              -exec cp {} "${{ steps.strings.outputs.artifact-dir }}/bin/" \; || true
+          fi
+
+      # 2) 打包源码（不含构建目录）
+      - name: Package source code
+        shell: bash
+        run: |
+          mkdir -p "${{ steps.strings.outputs.artifact-dir }}/source"
+          # 使用 git archive 打包源码（自动排除 .git 和构建产物）
+          git archive --format=tar.gz -o \
+            "${{ steps.strings.outputs.artifact-dir }}/source/source-${{ matrix.artifact_name }}.tar.gz" \
+            HEAD
+
+      # 3) 打包构建目录（含 CMakeCache 等中间文件，便于复现）
+      - name: Package build directory
+        shell: bash
+        run: |
+          cd "${{ steps.strings.outputs.build-output-dir }}/.."
+          # 排除体积较大的中间文件以减小体积（可按需保留）
+          tar -czf "${{ steps.strings.outputs.artifact-dir }}/build-${{ matrix.artifact_name }}.tar.gz" \
+            -C "${{ github.workspace }}" build
+
+      - name: List artifact contents
+        shell: bash
+        run: ls -lahR "${{ steps.strings.outputs.artifact-dir }}"
+
+      # ============ 上传步骤 ============
+
+      # 上传最终可执行文件/库
+      - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: boxstudio-${{ matrix.os }}-${{ matrix.cpp_compiler }}-gui${{ matrix.gui }}
-          path: ${{ env.ZIP_PATH }}
-          if-no-files-found: error
-          retention-days: 14
+          name: ${{ matrix.artifact_name }}-binaries
+          path: ${{ steps.strings.outputs.artifact-dir }}/bin/
+          if-no-files-found: warn
+          retention-days: 30
 
-      # ---------- 打 tag 时：上传到 GitHub Release ----------
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      # 上传源码包
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
         with:
-          files: ${{ env.ZIP_PATH }}
-          generate_release_notes: true
+          name: ${{ matrix.artifact_name }}-source
+          path: ${{ steps.strings.outputs.artifact-dir }}/source/*.tar.gz
+          if-no-files-found: warn
+          retention-days: 30
+
+      # 上传完整构建目录（含中间文件）
+      - name: Upload full build directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}-build
+          path: ${{ steps.strings.outputs.artifact-dir }}/build-*.tar.gz
+          if-no-files-found: warn
+          retention-days: 30
