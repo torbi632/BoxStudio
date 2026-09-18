@@ -1,0 +1,29 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential
+        # 如果 GUI 依赖 Qt，请取消下面注释并按需安装
+        # sudo apt-get install -y qtbase5-dev qt5-qmake
+        # 如果还有其他依赖，在这里继续添加
+
+    - name: Configure CMake
+      run: cmake -S . -B build -DBOXSTUDIO_BUILD_GUI=ON -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --config Release
