@@ -62,43 +62,42 @@ jobs:
 
       - name: Prepare artifact directory
         shell: bash
-        run: mkdir -p "${{ steps.strings.outputs.artifact-dir }}"
+        run: mkdir -p "${{ steps.strings.outputs.artifact-dir }}/bin"
 
       # 1) 打包构建产物（可执行文件/库等）
       - name: Package build output
         shell: bash
         run: |
-          mkdir -p "${{ steps.strings.outputs.artifact-dir }}/bin"
-          # 复制构建产物（可执行文件、动态库等）
-          # Windows: .exe / .dll  |  Linux: 无扩展名可执行文件 / .so
-          find "${{ steps.strings.outputs.build-output-dir }}" \
-            -type f \( -name "*.exe" -o -name "*.dll" -o -name "*.so" -o -name "*.a" -o -name "*.lib" \) \
-            -exec cp {} "${{ steps.strings.outputs.artifact-dir }}/bin/" \; || true
+          ARTIFACT_BIN="${{ steps.strings.outputs.artifact-dir }}/bin"
+          BUILD_DIR="${{ steps.strings.outputs.build-output-dir }}"
 
-          # 如果可执行文件没有扩展名（Linux），复制 build 根目录下的可执行文件
+          # Windows: .exe / .dll / .lib  |  Linux: .so / .a
+          find "$BUILD_DIR" -type f \
+            \( -name "*.exe" -o -name "*.dll" -o -name "*.so" -o -name "*.a" -o -name "*.lib" \) \
+            -exec cp {} "$ARTIFACT_BIN/" \; || true
+
+          # Linux 下无扩展名的可执行文件
           if [ "${{ runner.os }}" = "Linux" ]; then
-            find "${{ steps.strings.outputs.build-output-dir }}" -maxdepth 2 -type f -executable \
+            find "$BUILD_DIR" -maxdepth 2 -type f -executable \
               ! -name "*.so*" ! -name "*.a" \
-              -exec cp {} "${{ steps.strings.outputs.artifact-dir }}/bin/" \; || true
+              -exec cp {} "$ARTIFACT_BIN/" \; || true
           fi
 
-      # 2) 打包源码（不含构建目录）
+      # 2) 打包源码（用相对文件名，避开 Windows 盘符解析问题）
       - name: Package source code
         shell: bash
         run: |
-          mkdir -p "${{ steps.strings.outputs.artifact-dir }}/source"
-          # 使用 git archive 打包源码（自动排除 .git 和构建产物）
-          git archive --format=tar.gz -o \
-            "${{ steps.strings.outputs.artifact-dir }}/source/source-${{ matrix.artifact_name }}.tar.gz" \
-            HEAD
+          cd "${{ steps.strings.outputs.artifact-dir }}/source"
+          git archive --format=tar.gz \
+            -o "source-${{ matrix.artifact_name }}.tar.gz" \
+            -C "${{ github.workspace }}" HEAD
 
-      # 3) 打包构建目录（含 CMakeCache 等中间文件，便于复现）
+      # 3) 打包构建目录（用相对文件名，避开 Windows 盘符解析问题）
       - name: Package build directory
         shell: bash
         run: |
-          cd "${{ steps.strings.outputs.build-output-dir }}/.."
-          # 排除体积较大的中间文件以减小体积（可按需保留）
-          tar -czf "${{ steps.strings.outputs.artifact-dir }}/build-${{ matrix.artifact_name }}.tar.gz" \
+          cd "${{ steps.strings.outputs.artifact-dir }}"
+          tar -czf "build-${{ matrix.artifact_name }}.tar.gz" \
             -C "${{ github.workspace }}" build
 
       - name: List artifact contents
